@@ -7,13 +7,15 @@ on:
   push:
     branches: [main]
     paths:
-      - "data/companies.csv"
+      - "data/companies/**"
       - "scripts/collect_jobs.py"
+      - "scripts/merge_job_shards.py"
       - "index.html"
       - ".github/workflows/pages.yml"
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -22,19 +24,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  crawl:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
-      - name: Check listed official recruitment pages
-        run: python scripts/collect_jobs.py
+      - name: Check public official recruitment pages
+        run: >-
+          python scripts/collect_jobs.py
+          --shard-index ${{ matrix.shard }}
+          --shard-count 8
+          --output data/jobs-shard-${{ matrix.shard }}.json
+
+      - name: Upload crawl shard
+        uses: actions/upload-artifact@v7
+        with:
+          name: jobs-shard-${{ matrix.shard }}
+          path: data/jobs-shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble:
+    needs: crawl
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Download crawl shards
+        uses: actions/download-artifact@v8
+        with:
+          pattern: jobs-shard-*
+          path: data/shards
+          merge-multiple: true
+
+      - name: Merge and validate all companies
+        run: python scripts/merge_job_shards.py data/shards data/jobs.json
 
       - name: Prepare Pages artifact
         run: |
@@ -45,12 +87,12 @@ jobs:
           find site -maxdepth 3 -type f -print
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: ./site
 
   deploy:
-    needs: build
+    needs: assemble
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -58,4 +100,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5.0.1

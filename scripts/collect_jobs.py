@@ -8,6 +8,7 @@ needs_confirmation.
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import datetime as dt
 import hashlib
@@ -26,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_FILE = ROOT / "data" / "companies.csv"
+INPUT_DIR = ROOT / "data" / "companies"
 OUTPUT_FILE = ROOT / "data" / "jobs.json"
 JST = ZoneInfo("Asia/Tokyo")
 USER_AGENT = (
@@ -434,45 +436,54 @@ def stable_id(seed: dict[str, object]) -> str:
 
 
 def load_seeds() -> list[dict[str, object]]:
-    if not INPUT_FILE.exists():
-        raise FileNotFoundError(f"Missing input file: {INPUT_FILE}")
-    with INPUT_FILE.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise ValueError("data/companies.csv has no header row")
-        seeds: list[dict[str, object]] = []
-        seen: set[str] = set()
-        for row in reader:
-            company = row_value(row, "company", "companyName", "企業名", "会社名")
-            page_url = row_value(row, "companyRecruitmentUrl", "recruitmentUrl", "url", "採用ページ")
-            if not company:
-                continue
-            key = company_key(company, row_value(row, "companyNumber", "法人番号"))
-            if key in seen:
-                continue
-            seen.add(key)
-            seeds.append({
-                "id": "",
-                "company": company,
-                "companyNumber": row_value(row, "companyNumber", "法人番号"),
-                "companyMatchKey": key,
-                "industry": row_value(row, "industry", "業界", "業種"),
-                "size": row_value(row, "size", "企業規模"),
-                "employeesRaw": row_value(row, "employees", "employeesRaw", "従業員数"),
-                "employees": number_value(row_value(row, "employees", "employeesRaw", "従業員数")),
-                "location": row_value(row, "location", "都道府県", "勤務地"),
-                "companyAddress": row_value(row, "companyAddress", "企業所在地"),
-                "business": row_value(row, "business", "description", "企業概要"),
-                "companyRecruitmentUrl": page_url,
-                "helloWorkGradUrl": row_value(row, "helloWorkGradUrl", "大卒求人リンク"),
-                "candidate": split_candidates(row_value(row, "candidate", "招聘对象")),
-                "legacyRoles": row_value(row, "legacyRoles", "roles", "職種"),
-                "legacyGraduationYear": row_value(row, "legacyGraduationYear", "graduationYear", "卒業年度"),
-                "legacyNote": row_value(row, "legacyNote", "sourceNote", "核验备注"),
-                "sourceLabel": row_value(row, "sourceLabel", "来源"),
-            })
+    files = sorted(INPUT_DIR.glob("companies-*.csv")) if INPUT_DIR.exists() else []
+    if INPUT_FILE.exists():
+        files.insert(0, INPUT_FILE)
+    if not files:
+        raise FileNotFoundError(f"Missing company CSV files under {INPUT_DIR}")
+
+    seeds: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for input_path in files:
+        with input_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames:
+                raise ValueError(f"{input_path.relative_to(ROOT)} has no header row")
+            for row in reader:
+                company = row_value(row, "company", "companyName", "企業名", "会社名")
+                page_url = row_value(row, "companyRecruitmentUrl", "recruitmentUrl", "採用ページ")
+                homepage = row_value(row, "companyHomepage", "homepage", "企業ホームページ")
+                if not company:
+                    continue
+                key = company_key(company, row_value(row, "companyNumber", "法人番号"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                crawl_url = page_url or homepage
+                seeds.append({
+                    "id": "",
+                    "company": company,
+                    "companyNumber": row_value(row, "companyNumber", "法人番号"),
+                    "companyMatchKey": key,
+                    "industry": row_value(row, "industry", "業界", "業種"),
+                    "size": row_value(row, "size", "企業規模区分"),
+                    "employeesRaw": row_value(row, "employees", "employeesRaw", "従業員数", "企業規模"),
+                    "employees": number_value(row_value(row, "employees", "employeesRaw", "従業員数", "企業規模")),
+                    "location": row_value(row, "location", "都道府県", "勤務地"),
+                    "companyAddress": row_value(row, "companyAddress", "企業所在地", "所在地"),
+                    "business": row_value(row, "business", "description", "企業概要", "事業概要"),
+                    "companyRecruitmentUrl": page_url,
+                    "companyHomepage": homepage,
+                    "crawlUrl": crawl_url,
+                    "helloWorkGradUrl": row_value(row, "helloWorkGradUrl", "大卒求人リンク"),
+                    "candidate": split_candidates(row_value(row, "candidate", "招聘对象")),
+                    "legacyRoles": row_value(row, "legacyRoles", "roles", "職種"),
+                    "legacyGraduationYear": row_value(row, "legacyGraduationYear", "graduationYear", "卒業年度"),
+                    "legacyNote": row_value(row, "legacyNote", "sourceNote", "核验备注"),
+                    "sourceLabel": row_value(row, "sourceLabel", "来源"),
+                })
     if not seeds:
-        raise ValueError("data/companies.csv contains no company rows")
+        raise ValueError("company CSV files contain no company rows")
     return seeds
 
 
@@ -481,8 +492,44 @@ def number_value(value: str) -> int | None:
     return int(match.group(0).replace(",", "")) if match else None
 
 
+def recruitment_page_link(links: list[dict[str, str]], page_url: str) -> str | None:
+    homepage_host = (urllib.parse.urlsplit(page_url).hostname or "").lower()
+    pattern = re.compile(r"採用|新卒|求人|recruit|career", re.IGNORECASE)
+    excluded = re.compile(r"問い合わせ|問合せ|個人情報|プライバシー|ログイン", re.IGNORECASE)
+    choices: list[tuple[int, str]] = []
+    for link in links:
+        label = flat(link.get("text", ""))
+        href = (link.get("href") or "").strip()
+        if not href or href.startswith(("mailto:", "tel:", "javascript:")) or excluded.search(label):
+            continue
+        absolute = urllib.parse.urljoin(page_url, href)
+        parsed = urllib.parse.urlsplit(absolute)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            continue
+        if parsed.hostname.lower() != homepage_host:
+            continue
+        if not pattern.search(label + " " + parsed.path):
+            continue
+        score = 3 if re.search(r"採用|新卒", label, re.IGNORECASE) else 1
+        if re.search(r"recruit|career", parsed.path, re.IGNORECASE):
+            score += 1
+        choices.append((score, absolute))
+    choices.sort(key=lambda item: (-item[0], len(item[1])))
+    return choices[0][1] if choices else None
+
+
+def shard_for(seed: dict[str, object], shard_count: int) -> int:
+    url = str(seed.get("crawlUrl") or seed.get("companyRecruitmentUrl") or seed.get("companyHomepage") or "")
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    key = host or str(seed.get("companyMatchKey") or seed.get("company") or "")
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return int(digest[:12], 16) % shard_count
+
+
 def scrape_one(seed: dict[str, object], checked_at: dt.datetime) -> dict[str, object]:
-    source_url = str(seed.get("companyRecruitmentUrl") or "")
+    source_url = str(seed.get("crawlUrl") or seed.get("companyRecruitmentUrl") or seed.get("companyHomepage") or "")
+    direct_recruitment_url = str(seed.get("companyRecruitmentUrl") or "")
+    homepage_fallback = not direct_recruitment_url and bool(seed.get("companyHomepage"))
     checked_date = checked_at.date().isoformat()
     base = {
         **seed,
@@ -504,31 +551,46 @@ def scrape_one(seed: dict[str, object], checked_at: dt.datetime) -> dict[str, ob
         "seminarTime": "",
         "selection": "",
         "selectionTime": "",
-        "roles": "",
-        "graduationYear": "年度未注明",
+        "roles": str(seed.get("legacyRoles") or ""),
+        "graduationYear": str(seed.get("legacyGraduationYear") or "年度未注明"),
         "fieldEvidence": {},
         "fieldConfidence": {},
         "openStatus": "",
     }
     if not source_url:
-        base["recruitmentSourceNote"] = "没有企业招聘页网址；需要人工补充官方来源链接。"
+        base["recruitmentSourceNote"] = "没有企业官网或招聘页网址；需要人工补充官方来源链接。"
         return base
 
     try:
         html_text, final_url = fetch_html(source_url)
     except Exception as exc:
         base["recruitmentSourceNote"] = (
-            f"本次未能读取企业招聘页：{exc}。没有猜测岗位、对象或日期；旧岗位记录需要人工确认。"
+            f"本次未能读取官网页面：{exc}。没有猜测岗位、对象或日期；旧岗位记录需要人工确认。"
         )
         base["roles"] = str(seed.get("legacyRoles") or "")
-        base["graduationYear"] = str(seed.get("legacyGraduationYear") or "年度未注明")
         base["recruitmentErrorKind"] = exc.__class__.__name__
         return base
 
     text, links = extract_document(html_text)
+    discovered_recruitment = ""
+    discovery_note = ""
+    if homepage_fallback:
+        candidate_url = recruitment_page_link(links, final_url)
+        if candidate_url:
+            try:
+                recruitment_html, recruitment_final_url = fetch_html(candidate_url)
+                text, links = extract_document(recruitment_html)
+                final_url = recruitment_final_url
+                discovered_recruitment = recruitment_final_url
+            except Exception as exc:
+                discovery_note = f"官网可访问，但招聘入口未能读取：{exc.__class__.__name__}。"
+        else:
+            discovery_note = "官网可访问，但页面没有找到同域招聘入口；需确认。"
+
+    actual_recruitment_url = direct_recruitment_url or discovered_recruitment
     base.update({
         "sourceUrl": final_url,
-        "companyRecruitmentUrl": final_url,
+        "companyRecruitmentUrl": actual_recruitment_url or None,
         "recruitmentSourcePageAccessible": True,
     })
     evidence_map: dict[str, dict[str, object]] = {}
@@ -583,11 +645,14 @@ def scrape_one(seed: dict[str, object], checked_at: dt.datetime) -> dict[str, ob
 
     base["fieldEvidence"] = evidence_map
     base["fieldConfidence"] = confidence_map
-    base["recruitmentSourceNote"] = (
-        "官网页面可读取。系统只记录页面出现的原文；未找到明确内容的字段保持空白并需确认。"
-        if base["recruitmentSourceStatus"] == "needs_confirmation"
-        else f"官网页面明确出现受理状态文字：{period_snippet[:200]}"
-    )
+    if discovery_note:
+        base["recruitmentSourceNote"] = discovery_note + " 页面只记录明确出现的内容；未找到的字段保持空白并需确认。"
+    else:
+        base["recruitmentSourceNote"] = (
+            "官网页面可读取。系统只记录页面出现的原文；未找到明确内容的字段保持空白并需确认。"
+            if base["recruitmentSourceStatus"] == "needs_confirmation"
+            else f"官网页面明确出现受理状态文字：{period_snippet[:200]}"
+        )
     if base["recruitmentSourceStatus"] == "closed":
         base["openStatus"] = "closed"
     elif base["recruitmentSourceStatus"] == "open":
@@ -596,21 +661,36 @@ def scrape_one(seed: dict[str, object], checked_at: dt.datetime) -> dict[str, ob
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Check public official recruitment pages.")
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--output", default=str(OUTPUT_FILE))
+    args = parser.parse_args()
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        parser.error("--shard-index must be between 0 and --shard-count - 1")
+
     checked_at = dt.datetime.now(JST).replace(microsecond=0)
     seeds = load_seeds()
+    all_count = len(seeds)
+    if args.shard_count > 1:
+        seeds = [seed for seed in seeds if shard_for(seed, args.shard_count) == args.shard_index]
     records: list[dict[str, object]] = []
+    print(f"Shard {args.shard_index + 1}/{args.shard_count}: {len(seeds)} of {all_count} companies")
     for index, seed in enumerate(seeds, start=1):
         print(f"[{index}/{len(seeds)}] checking {seed['company']}")
         records.append(scrape_one(seed, checked_at))
 
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temporary = OUTPUT_FILE.with_suffix(".json.tmp")
+    output_file = Path(args.output)
+    if not output_file.is_absolute():
+        output_file = ROOT / output_file
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_file.with_suffix(output_file.suffix + ".tmp")
     temporary.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(OUTPUT_FILE)
+    temporary.replace(output_file)
     accessible = sum(1 for item in records if item["recruitmentSourcePageAccessible"])
     open_count = sum(1 for item in records if item["recruitmentSourceStatus"] == "open")
     confirm_count = sum(1 for item in records if item["recruitmentSourceStatus"] == "needs_confirmation")
-    print(f"Output: {OUTPUT_FILE}")
+    print(f"Output: {output_file}")
     print(f"Companies: {len(records)}; pages read: {accessible}; explicit open: {open_count}; needs confirmation: {confirm_count}")
 
 
