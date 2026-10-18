@@ -45,7 +45,7 @@ jobs:
           git commit -m "Auto-generate data/companies.json"
           git push --set-upstream origin HEAD:$BRANCH
 
-           - name: Create pull request
+      - name: Create pull request
         uses: peter-evans/create-pull-request@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
