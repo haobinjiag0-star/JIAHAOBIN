@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      BRANCH: auto/generate-data-${{ github.run_id }}
 
     steps:
       - name: Checkout
@@ -31,19 +33,16 @@ jobs:
         run: python scripts/collect_jobs.py
 
       - name: Commit generated file (if changed) and push to branch
-        env:
-          BRANCH: auto/generate-data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f data/companies.json || true
-          # 如果没有变化则退出
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
           fi
           git commit -m "Auto-generate data/companies.json"
-          git push --set-upstream origin HEAD:$BRANCH
+          git push --set-upstream origin HEAD:${BRANCH}
 
       - name: Create pull request
         uses: peter-evans/create-pull-request@v4
@@ -53,4 +52,4 @@ jobs:
           title: "Auto-generate companies.json"
           body: "This PR updates companies.json generated from CSV by workflow."
           base: main
-          branch: auto/generate-data
+          branch: ${{ env.BRANCH }}
