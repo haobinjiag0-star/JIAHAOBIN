@@ -405,6 +405,23 @@ def extract_application_window(snippet: str, today: dt.date) -> dict[str, object
     }
 
 
+def resolve_http_link(page_url: str, href: str) -> tuple[str, urllib.parse.SplitResult] | None:
+    """Resolve a page link, ignoring malformed URLs instead of aborting a shard."""
+    try:
+        absolute = urllib.parse.urljoin(page_url, href)
+        parsed = urllib.parse.urlsplit(absolute)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
+            return None
+        return absolute, parsed
+    except (TypeError, ValueError, UnicodeError):
+        return None
+
+
 def application_link(links: list[dict[str, str]], page_url: str) -> tuple[str | None, str]:
     choices: list[tuple[int, str, str]] = []
     pattern = re.compile(r"エントリー|応募する|応募はこちら|マイページ|entry|apply", re.IGNORECASE)
@@ -416,10 +433,10 @@ def application_link(links: list[dict[str, str]], page_url: str) -> tuple[str | 
             continue
         if not pattern.search(label + " " + href):
             continue
-        absolute = urllib.parse.urljoin(page_url, href)
-        parsed = urllib.parse.urlsplit(absolute)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        resolved = resolve_http_link(page_url, href)
+        if resolved is None:
             continue
+        absolute, parsed = resolved
         score = 3 if re.search(r"エントリー|応募する|応募はこちら|entry|apply", label, re.I) else 1
         if parsed.hostname.lower() == urllib.parse.urlsplit(page_url).hostname.lower():
             score += 1
@@ -502,10 +519,10 @@ def recruitment_page_link(links: list[dict[str, str]], page_url: str) -> str | N
         href = (link.get("href") or "").strip()
         if not href or href.startswith(("mailto:", "tel:", "javascript:")) or excluded.search(label):
             continue
-        absolute = urllib.parse.urljoin(page_url, href)
-        parsed = urllib.parse.urlsplit(absolute)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        resolved = resolve_http_link(page_url, href)
+        if resolved is None:
             continue
+        absolute, parsed = resolved
         if parsed.hostname.lower() != homepage_host:
             continue
         if not pattern.search(label + " " + parsed.path):
