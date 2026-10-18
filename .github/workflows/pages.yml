@@ -1,9 +1,16 @@
-name: GitHub Pages Deploy
+name: Build and deploy JIAHAOBIN
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 17 * * *"
+    - cron: "17 17 * * *" # 02:17 JST
+  push:
+    branches: [main]
+    paths:
+      - "data/companies.csv"
+      - "scripts/collect_jobs.py"
+      - "index.html"
+      - ".github/workflows/pages.yml"
 
 permissions:
   contents: read
@@ -26,16 +33,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Generate public jobs data
-        run: |
-          python scripts/collect_jobs.py
+      - name: Check listed official recruitment pages
+        run: python scripts/collect_jobs.py
 
       - name: Prepare Pages artifact
         run: |
-          mkdir -p site
-          cp index.html site/
-          cp -r data site/
-          ls -R site
+          rm -rf site
+          mkdir -p site/data
+          cp index.html site/index.html
+          cp data/jobs.json site/data/jobs.json
+          find site -maxdepth 3 -type f -print
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
